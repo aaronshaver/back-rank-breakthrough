@@ -719,36 +719,46 @@
 
             if (alivePieces.length === 0) return null;
 
-            let bestMove = null;
-            let bestScore = -Infinity;
+            // Prefer selecting moves by piece type order
+            const TYPE_ORDER = ['queen', 'rook', 'bishop', 'knight', 'king', 'pawn'];
 
-            for (const piece of alivePieces) {
-                // Black cannot capture, so pass true for noCapture
-                const moves = getValidMoves(piece, allPieces, true);
+            for (const type of TYPE_ORDER) {
+                const typePieces = alivePieces.filter(p => p.type === type);
+                if (typePieces.length === 0) continue;
 
-                for (const move of moves) {
-                    // Score based on progress toward bottom
-                    let score = move.y;
+                let bestMove = null;
+                let bestScore = -Infinity;
 
-                    // Bonus for reaching the back rank
-                    if (move.y === BOARD_HEIGHT - 1) {
-                        score += 100 + piece.getValue() * 10;
-                    }
+                for (const piece of typePieces) {
+                    // Black cannot capture, so pass true for noCapture
+                    const moves = getValidMoves(piece, allPieces, true);
 
-                    // Prefer valuable pieces making progress
-                    score += piece.getValue() * 0.5;
+                    for (const move of moves) {
+                        // Score based on progress toward bottom
+                        let score = move.y;
 
-                    // Add some randomness to make it less predictable
-                    score += Math.random() * 0.5;
+                        // Bonus for reaching the back rank
+                        if (move.y === BOARD_HEIGHT - 1) {
+                            score += 100 + piece.getValue() * 10;
+                        }
 
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestMove = { piece, move };
+                        // Prefer valuable pieces making progress
+                        score += piece.getValue() * 0.5;
+
+                        // Add some randomness to make it less predictable
+                        score += Math.random() * 0.5;
+
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestMove = { piece, move };
+                        }
                     }
                 }
+
+                if (bestMove) return bestMove;
             }
 
-            return bestMove;
+            return null;
         }
 
         // White decision hierarchy:
