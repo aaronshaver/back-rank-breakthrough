@@ -61,23 +61,21 @@
             margin-bottom: 20px;
         }
 
-        .score-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 10px;
-            margin: 5px 0;
-            border-radius: 4px;
-        }
-
-        .white-score {
-            background-color: #f0f0f0;
-            color: #1a1a1a;
-        }
-
-        .black-score {
+        .score-box {
+            padding: 12px;
+            border-radius: 6px;
             background-color: #333;
             color: #fff;
             border: 1px solid #555;
+            line-height: 1.25;
+            transition: box-shadow 200ms ease;
+            user-select: none;
+        }
+
+        .score-flash {
+            box-shadow:
+                0 0 10px rgba(255, 215, 0, 0.55),
+                0 0 18px rgba(255, 215, 0, 0.28);
         }
 
         .control-group {
@@ -121,14 +119,6 @@
             border-bottom: 1px solid #444;
             padding-bottom: 10px;
         }
-
-        .turn-counter {
-            text-align: center;
-            padding: 10px;
-            background-color: #333;
-            border-radius: 4px;
-            margin-bottom: 15px;
-        }
     </style>
 </head>
 <body>
@@ -141,18 +131,9 @@
             <h4>Chess Tower Defense</h4>
 
             <div class="score-display">
-                <div class="score-item white-score">
-                    <span>White (Defender):</span>
-                    <span id="whiteScore">0</span>
+                <div class="score-box" id="blackReachedBox">
+                    <strong id="blackReachedCount">0</strong> Black Pieces Reached the Bottom Row
                 </div>
-                <div class="score-item black-score">
-                    <span>Black (Attacker):</span>
-                    <span id="blackScore">0</span>
-                </div>
-            </div>
-
-            <div class="turn-counter">
-                Turn: <span id="turnCounter">0</span>
             </div>
 
             <div class="control-group">
@@ -200,12 +181,15 @@
         // ============== GAME STATE ==============
         let canvas, ctx;
         let squareSize;
+        let flashTimeout = null;
+
         let gameState = {
             whitePieces: [],
             blackPieces: [],
-            whiteScore: 0,
-            blackScore: 0,
-            turn: 0,
+            whiteScore: 0,          // kept for internal logic/history
+            blackScore: 0,          // kept for internal logic/history
+            blackReached: 0,        // count of black pieces that reached bottom row
+            turn: 0,                // kept internally (no UI)
             running: false,
             paused: false,
             delay: 1000,
@@ -679,27 +663,27 @@
 
         function whiteAI(blackPlan) {
             if (!blackPlan) return null;
-        
+
             const allPieces = [...gameState.whitePieces, ...gameState.blackPieces];
             const alivePieces = gameState.whitePieces.filter(p => p.alive);
-        
+
             if (alivePieces.length === 0) return null;
-        
+
             // Target square is ONLY the final destination of black's move
             const targetX = blackPlan.move.x;
             const targetY = blackPlan.move.y;
-        
+
             let bestMove = null;
             let bestScore = -Infinity;
-        
+
             for (const piece of alivePieces) {
-        
+
                 // ---- FIX: white pawns may only "capture" (intercept) diagonally ----
                 if (piece.type === 'pawn') {
                     const direction = piece.color === 'black' ? 1 : -1; // white = -1
                     const dx = targetX - piece.x;
                     const dy = targetY - piece.y;
-        
+
                     // Only allow pawn interception if the target is one step diagonally forward
                     if (Math.abs(dx) === 1 && dy === direction) {
                         const score = 1000 + blackPlan.piece.getValue() * 100 - piece.getValue();
@@ -716,40 +700,40 @@
                             };
                         }
                     }
-        
+
                     // Prevent pawns from "capturing" by moving straight forward
                     continue;
                 }
                 // -------------------------------------------------------------------
-        
+
                 // White CAN capture, so pass false for noCapture
                 const moves = getValidMoves(piece, allPieces, false);
-        
+
                 for (const move of moves) {
                     let score = 0;
-        
+
                     // Check if this move lands on the EXACT target square where black will end up
                     // This is the ONLY way white can intercept
                     if (move.x === targetX && move.y === targetY) {
                         // This is a valid interception - white meets black at the target
                         score = 1000 + blackPlan.piece.getValue() * 100;
-        
+
                         // Prefer using less valuable pieces for interception
                         score -= piece.getValue();
                     }
-        
+
                     if (score > bestScore) {
                         bestScore = score;
                         bestMove = { piece, move, intercepting: score >= 1000 };
                     }
                 }
             }
-        
+
             // If no interception possible, don't move (or could implement other strategies)
             if (bestScore < 1000) {
                 return null;
             }
-        
+
             return bestMove;
         }
 
@@ -767,7 +751,7 @@
                 // Check if game should end
                 const blackAlive = gameState.blackPieces.filter(p => p.alive).length;
                 if (blackAlive === 0) {
-                    setStatus('All black pieces eliminated! White wins!');
+                    setStatus('Game Complete');
                     gameState.running = false;
                     break;
                 }
@@ -775,7 +759,7 @@
                 // Black plans a move
                 const blackPlan = blackAI();
                 if (!blackPlan) {
-                    setStatus('Black has no valid moves!');
+                    setStatus('Game Complete');
                     gameState.running = false;
                     break;
                 }
@@ -793,7 +777,7 @@
                 if (whitePlan && whitePlan.intercepting) {
                     gameState.currentCounter = whitePlan.move;
                     draw();
-                    setStatus(`White ${whitePlan.piece.type} intercepts at (${whitePlan.move.x},${whitePlan.move.y})!`);
+                    setStatus(`White ${whitePlan.piece.type} captures at (${whitePlan.move.x},${whitePlan.move.y})`);
                     await sleep(gameState.delay);
                 }
 
@@ -809,7 +793,7 @@
                     gameState.whiteScore += blackPlan.piece.getValue();
                     blackCaptured = true;
 
-                    // Move white piece to the interception point
+                    // Move white piece to the capture point
                     whitePlan.piece.x = whitePlan.move.x;
                     whitePlan.piece.y = whitePlan.move.y;
                 }
@@ -822,9 +806,11 @@
 
                     // Check if black reached back rank
                     if (blackPlan.piece.y === BOARD_HEIGHT - 1) {
-                        gameState.blackScore += blackPlan.piece.getValue();
+                        gameState.blackReached += 1;
+                        gameState.blackScore += blackPlan.piece.getValue(); // kept internally
                         blackPlan.piece.alive = false;
-                        setStatus(`Black ${blackPlan.piece.type} scored! +${blackPlan.piece.getValue()}`);
+                        flashBlackReachedBox();
+                        setStatus(`Black ${blackPlan.piece.type} reached bottom row. +1`);
                     }
                 }
 
@@ -847,13 +833,25 @@
 
         // ============== UI ==============
         function updateUI() {
-            document.getElementById('whiteScore').textContent = gameState.whiteScore;
-            document.getElementById('blackScore').textContent = gameState.blackScore;
-            document.getElementById('turnCounter').textContent = gameState.turn;
+            const el = document.getElementById('blackReachedCount');
+            if (el) el.textContent = gameState.blackReached;
         }
 
         function setStatus(text) {
             document.getElementById('statusText').textContent = text;
+        }
+
+        function flashBlackReachedBox() {
+            const box = document.getElementById('blackReachedBox');
+            if (!box) return;
+
+            box.classList.add('score-flash');
+
+            if (flashTimeout) clearTimeout(flashTimeout);
+            flashTimeout = setTimeout(() => {
+                box.classList.remove('score-flash');
+                flashTimeout = null;
+            }, 260);
         }
 
         function startGame() {
@@ -875,6 +873,7 @@
             gameState.paused = false;
             gameState.whiteScore = 0;
             gameState.blackScore = 0;
+            gameState.blackReached = 0;
             gameState.turn = 0;
             gameState.currentPlan = null;
             gameState.currentCounter = null;
