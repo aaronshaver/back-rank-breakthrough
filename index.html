@@ -679,48 +679,77 @@
 
         function whiteAI(blackPlan) {
             if (!blackPlan) return null;
-
+        
             const allPieces = [...gameState.whitePieces, ...gameState.blackPieces];
             const alivePieces = gameState.whitePieces.filter(p => p.alive);
-
+        
             if (alivePieces.length === 0) return null;
-
+        
             // Target square is ONLY the final destination of black's move
             const targetX = blackPlan.move.x;
             const targetY = blackPlan.move.y;
-
+        
             let bestMove = null;
             let bestScore = -Infinity;
-
+        
             for (const piece of alivePieces) {
+        
+                // ---- FIX: white pawns may only "capture" (intercept) diagonally ----
+                if (piece.type === 'pawn') {
+                    const direction = piece.color === 'black' ? 1 : -1; // white = -1
+                    const dx = targetX - piece.x;
+                    const dy = targetY - piece.y;
+        
+                    // Only allow pawn interception if the target is one step diagonally forward
+                    if (Math.abs(dx) === 1 && dy === direction) {
+                        const score = 1000 + blackPlan.piece.getValue() * 100 - piece.getValue();
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestMove = {
+                                piece,
+                                move: {
+                                    x: targetX,
+                                    y: targetY,
+                                    path: [{ x: piece.x, y: piece.y }, { x: targetX, y: targetY }]
+                                },
+                                intercepting: true
+                            };
+                        }
+                    }
+        
+                    // Prevent pawns from "capturing" by moving straight forward
+                    continue;
+                }
+                // -------------------------------------------------------------------
+        
                 // White CAN capture, so pass false for noCapture
                 const moves = getValidMoves(piece, allPieces, false);
-
+        
                 for (const move of moves) {
                     let score = 0;
-
+        
                     // Check if this move lands on the EXACT target square where black will end up
                     // This is the ONLY way white can intercept
                     if (move.x === targetX && move.y === targetY) {
                         // This is a valid interception - white meets black at the target
                         score = 1000 + blackPlan.piece.getValue() * 100;
-
+        
                         // Prefer using less valuable pieces for interception
                         score -= piece.getValue();
                     }
-
+        
                     if (score > bestScore) {
                         bestScore = score;
                         bestMove = { piece, move, intercepting: score >= 1000 };
                     }
                 }
             }
-
+        
             // If no interception possible, don't move (or could implement other strategies)
             if (bestScore < 1000) {
                 return null;
             }
-
+        
             return bestMove;
         }
 
