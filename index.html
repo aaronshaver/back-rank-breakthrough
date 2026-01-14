@@ -133,6 +133,12 @@
             user-select: none;
         }
 
+        /* Selected state for started/paused */
+        .btn-state-on {
+            outline: 2px solid rgba(255,255,255,0.35);
+            box-shadow: 0 0 10px rgba(255,255,255,0.18);
+        }
+
         /* Role dialog (custom modal) */
         .role-overlay {
             position: fixed;
@@ -283,7 +289,8 @@
             delay: 1000,
             currentPlan: null,
             currentCounter: null,
-            playingAs: null         // 'Black' or 'White'
+            playingAs: null,        // 'Black' or 'White'
+            blackMoveHistory: []    // executed moves only (for repeat-avoidance)
         };
 
         // ============== PIECE CLASS ==============
@@ -460,10 +467,8 @@
             ctx.textBaseline = 'middle';
             ctx.fillStyle = piece.color === 'white' ? '#333' : '#fff';
 
-            // Disable image smoothing for crisper text
             ctx.imageSmoothingEnabled = false;
 
-            // Round to pixel boundary for sharper rendering
             const textX = Math.round(cx);
             const textY = Math.round(cy);
             ctx.fillText(piece.getLetter(), textX, textY);
@@ -489,7 +494,6 @@
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Draw target circle
             const target = plan.path[plan.path.length - 1];
             const tx = target.x * squareSize + squareSize / 2;
             const ty = target.y * squareSize + squareSize / 2;
@@ -549,12 +553,10 @@
             const newY = piece.y + direction;
 
             if (newY >= 0 && newY < BOARD_HEIGHT) {
-                // Forward move
                 if (!occupied.has(`${piece.x},${newY}`)) {
                     moves.push({ x: piece.x, y: newY, path: [{ x: piece.x, y: piece.y }, { x: piece.x, y: newY }] });
                 }
 
-                // Diagonal captures
                 if (!noCapture) {
                     for (const dx of [-1, 1]) {
                         const newX = piece.x + dx;
@@ -712,50 +714,138 @@
             return moves;
         }
 
+        // ============== AI HELPERS ==============
+        function buildOccupiedMapAfterBlackMove(allPieces, movingPiece, fromX, fromY, toX, toY) {
+            const occ = new Map();
+            for (const p of allPieces) {
+                if (!p.alive) continue;
+                occ.set(`${p.x},${p.y}`, p);
+            }
+            occ.delete(`${fromX},${fromY}`);
+            occ.set(`${toX},${toY}`, movingPiece);
+            return occ;
+        }
+
+        function openFileToBottomScore(occ, x, y) {
+            const bottomY = BOARD_HEIGHT - 1;
+            if (y >= bottomY) return 0;
+            // bottom square must be empty
+            if (occ.has(`${x},${bottomY}`)) return 0;
+            for (let yy = y + 1; yy < bottomY; yy++) {
+                if (occ.has(`${x},${yy}`)) return 0;
+            }
+            const dist = bottomY - y;
+            return 22 + dist * 2;
+        }
+
+        function openDiagonalToBottomScore(occ, x, y) {
+            const bottomY = BOARD_HEIGHT - 1;
+            if (y >= bottomY) return 0;
+
+            let best = 0;
+            const dirs = [[1, 1], [-1, 1]];
+            for (const [dx, dy] of dirs) {
+                let cx = x + dx;
+                let cy = y + dy;
+                while (cx >= 0 && cx < BOARD_WIDTH && cy >= 0 && cy < BOARD_HEIGHT) {
+                    if (occ.has(`${cx},${cy}`)) break;
+                    if (cy === bottomY) {
+                        // bottom square is empty by virtue of occ check above
+                        const dist = bottomY - y;
+                        best = Math.max(best, 22 + dist * 2);
+                        break;
+                    }
+                    cx += dx;
+                    cy += dy;
+                }
+            }
+            return best;
+        }
+
+        function wouldRepeatSecondToLast(candidate) {
+            const h = gameState.blackMoveHistory;
+            if (h.length < 2) return false;
+            const secondLast = h[h.length - 2];
+            return (
+                secondLast.piece === candidate.piece &&
+                secondLast.fromX === candidate.fromX &&
+                secondLast.fromY === candidate.fromY &&
+                secondLast.toX === candidate.toX &&
+                secondLast.toY === candidate.toY
+            );
+        }
+
         // ============== AI ==============
         function blackAI() {
             const allPieces = [...gameState.whitePieces, ...gameState.blackPieces];
             const alivePieces = gameState.blackPieces.filter(p => p.alive);
-
             if (alivePieces.length === 0) return null;
 
-            // Prefer selecting moves by piece type order
             const TYPE_ORDER = ['queen', 'rook', 'bishop', 'knight', 'king', 'pawn'];
 
-            for (const type of TYPE_ORDER) {
-                const typePieces = alivePieces.filter(p => p.type === type);
-                if (typePieces.length === 0) continue;
+            // Try with repeat-avoidance first; if everything gets skipped, fall back allowing repeats.
+            for (let pass = 0; pass < 2; pass++) {
+                const enforceRepeatAvoid = (pass === 0);
 
-                let bestMove = null;
-                let bestScore = -Infinity;
+                for (const type of TYPE_ORDER) {
+                    const typePieces = alivePieces.filter(p => p.type === type);
+                    if (typePieces.length === 0) continue;
 
-                for (const piece of typePieces) {
-                    // Black cannot capture, so pass true for noCapture
-                    const moves = getValidMoves(piece, allPieces, true);
+                    let bestMove = null;
+                    let bestScore = -Infinity;
 
-                    for (const move of moves) {
-                        // Score based on progress toward bottom
-                        let score = move.y;
+                    for (const piece of typePieces) {
+                        const moves = getValidMoves(piece, allPieces, true);
 
-                        // Bonus for reaching the back rank
-                        if (move.y === BOARD_HEIGHT - 1) {
-                            score += 100 + piece.getValue() * 10;
-                        }
+                        for (const move of moves) {
+                            const fromX = piece.x, fromY = piece.y;
+                            const toX = move.x, toY = move.y;
 
-                        // Prefer valuable pieces making progress
-                        score += piece.getValue() * 0.5;
+                            // Base: progress
+                            let score = toY;
 
-                        // Add some randomness to make it less predictable
-                        score += Math.random() * 0.5;
+                            // Huge: reach bottom
+                            if (toY === BOARD_HEIGHT - 1) {
+                                score += 100 + piece.getValue() * 10;
+                            }
 
-                        if (score > bestScore) {
-                            bestScore = score;
-                            bestMove = { piece, move };
+                            // Preference for higher-value mobility
+                            score += piece.getValue() * 0.5;
+
+                            // NEW: "open lane next turn" heuristic
+                            const occAfter = buildOccupiedMapAfterBlackMove(allPieces, piece, fromX, fromY, toX, toY);
+                            if (piece.type === 'rook') {
+                                score += openFileToBottomScore(occAfter, toX, toY);
+                            } else if (piece.type === 'bishop') {
+                                score += openDiagonalToBottomScore(occAfter, toX, toY);
+                            } else if (piece.type === 'queen') {
+                                score += openFileToBottomScore(occAfter, toX, toY);
+                                score += openDiagonalToBottomScore(occAfter, toX, toY);
+                            }
+
+                            // Light randomness
+                            score += Math.random() * 0.5;
+
+                            const candidate = { piece, move, fromX, fromY, toX, toY };
+
+                            // NEW: avoid repeating the second-to-last executed move (piece + coords)
+                            if (enforceRepeatAvoid && wouldRepeatSecondToLast(candidate)) {
+                                continue;
+                            }
+
+                            if (score > bestScore) {
+                                bestScore = score;
+                                bestMove = { piece, move };
+                            }
                         }
                     }
+
+                    if (bestMove) return bestMove;
+
+                    // If best for this type was skipped due to repeat-avoidance, try next lower type (continue loop)
                 }
 
-                if (bestMove) return bestMove;
+                // pass 1: allow repeats if needed
             }
 
             return null;
@@ -780,7 +870,6 @@
             let bestInterceptScore = -Infinity;
 
             for (const piece of alivePieces) {
-                // Pawns: only allow interception diagonally forward (do NOT allow straight-forward "capture")
                 if (piece.type === 'pawn') {
                     const direction = -1; // white = -1
                     const dx = targetX - piece.x;
@@ -808,7 +897,7 @@
                 for (const move of moves) {
                     if (move.x === targetX && move.y === targetY) {
                         let score = 1000 + blackPlan.piece.getValue() * 100;
-                        score -= piece.getValue(); // prefer lower-value interceptors
+                        score -= piece.getValue();
                         if (score > bestInterceptScore) {
                             bestInterceptScore = score;
                             bestIntercept = { kind: 'intercept', piece, move };
@@ -829,13 +918,11 @@
                 for (const move of moves) {
                     if (!move.capture) continue;
 
-                    // Avoid stepping onto black's planned destination square (would invalidate black move).
                     if (move.x === targetX && move.y === targetY) continue;
 
                     const captured = move.capture;
                     if (!captured.alive || captured.color !== 'black') continue;
 
-                    // CRITICAL: Do NOT allow capturing the currently-planned mover on its origin square.
                     if (captured === blackPlan.piece) continue;
 
                     let score = captured.getValue() * 120 + captured.y * 1.5 - piece.getValue() * 6;
@@ -874,8 +961,6 @@
 
                 for (const move of moves) {
                     if (move.capture) continue;
-
-                    // Avoid stepping onto black's planned destination square (would invalidate black move).
                     if (move.x === targetX && move.y === targetY) continue;
 
                     const newDist = distToCenter(move.x, move.y);
@@ -905,19 +990,19 @@
                     continue;
                 }
 
-                // Check if game should end
                 const blackAlive = gameState.blackPieces.filter(p => p.alive).length;
                 if (blackAlive === 0) {
                     setStatus('Game Complete');
                     gameState.running = false;
+                    updateControlButtons();
                     break;
                 }
 
-                // Black plans a move
                 const blackPlan = blackAI();
                 if (!blackPlan) {
                     setStatus('Game Complete');
                     gameState.running = false;
+                    updateControlButtons();
                     break;
                 }
 
@@ -929,7 +1014,6 @@
 
                 if (!gameState.running) break;
 
-                // White responds (intercept, capture elsewhere, or mobilize)
                 const whitePlan = whiteAI(blackPlan);
                 if (whitePlan) {
                     gameState.currentCounter = whitePlan.move;
@@ -948,20 +1032,16 @@
 
                 if (!gameState.running) break;
 
-                // Resolve moves
                 let blackCaptured = false;
 
                 if (whitePlan) {
                     if (whitePlan.kind === 'intercept') {
-                        // White captures the planned black mover by meeting it at the destination square
                         blackPlan.piece.alive = false;
                         blackCaptured = true;
 
-                        // Move white piece to the capture point
                         whitePlan.piece.x = whitePlan.move.x;
                         whitePlan.piece.y = whitePlan.move.y;
                     } else if (whitePlan.kind === 'capture') {
-                        // White captures a black piece on its current square (must NOT be the planned mover)
                         if (whitePlan.move.capture && whitePlan.move.capture.alive) {
                             whitePlan.move.capture.alive = false;
                             if (whitePlan.move.capture === blackPlan.piece) {
@@ -969,22 +1049,29 @@
                             }
                         }
 
-                        // Move white piece to the capture square
                         whitePlan.piece.x = whitePlan.move.x;
                         whitePlan.piece.y = whitePlan.move.y;
                     } else if (whitePlan.kind === 'mobilize') {
-                        // White simply moves toward center
                         whitePlan.piece.x = whitePlan.move.x;
                         whitePlan.piece.y = whitePlan.move.y;
                     }
                 }
 
-                // Execute black's move if not captured
                 if (!blackCaptured) {
+                    // record executed black move BEFORE changing piece coords
+                    const executed = {
+                        piece: blackPlan.piece,
+                        fromX: blackPlan.piece.x,
+                        fromY: blackPlan.piece.y,
+                        toX: blackPlan.move.x,
+                        toY: blackPlan.move.y
+                    };
+                    gameState.blackMoveHistory.push(executed);
+                    if (gameState.blackMoveHistory.length > 12) gameState.blackMoveHistory.shift();
+
                     blackPlan.piece.x = blackPlan.move.x;
                     blackPlan.piece.y = blackPlan.move.y;
 
-                    // Check if black reached back rank
                     if (blackPlan.piece.y === BOARD_HEIGHT - 1) {
                         gameState.blackReached += 1;
                         blackPlan.piece.alive = false;
@@ -1021,14 +1108,11 @@
             const el = document.getElementById('statusText');
             if (!box || !el) return;
 
-            // Reset to base (bigger overall)
             let size = 14;
             const minSize = 10;
 
             el.style.fontSize = size + 'px';
 
-            // Shrink until it fits (no clipping)
-            // Guard against pathological loops
             let guard = 0;
             while (el.scrollHeight > box.clientHeight && size > minSize && guard < 60) {
                 size -= 0.5;
@@ -1057,18 +1141,41 @@
             }, 260);
         }
 
+        function updateControlButtons() {
+            const startBtn = document.getElementById('startBtn');
+            const pauseBtn = document.getElementById('pauseBtn');
+            if (!startBtn || !pauseBtn) return;
+
+            startBtn.classList.toggle('btn-state-on', !!gameState.running);
+            pauseBtn.classList.toggle('btn-state-on', !!(gameState.running && gameState.paused));
+        }
+
         function startGame() {
             if (!gameState.running) {
                 gameState.running = true;
                 gameState.paused = false;
                 setStatus('Simulation running...');
+                updateControlButtons();
                 gameLoop();
+                return;
+            }
+
+            // NEW: Start also unpauses if currently paused
+            if (gameState.running && gameState.paused) {
+                gameState.paused = false;
+                setStatus('Resumed');
+                updateControlButtons();
             }
         }
 
         function togglePause() {
+            if (!gameState.running) {
+                // no-op if not started
+                return;
+            }
             gameState.paused = !gameState.paused;
             setStatus(gameState.paused ? 'Paused' : 'Resumed');
+            updateControlButtons();
         }
 
         function showRoleDialog() {
@@ -1094,6 +1201,7 @@
             gameState.blackReached = 0;
             gameState.currentPlan = null;
             gameState.currentCounter = null;
+            gameState.blackMoveHistory = [];
 
             spawnPieces();
             updateUI();
@@ -1103,9 +1211,10 @@
             showRoleDialog();
             const playingEl = document.getElementById('playingAs');
             if (playingEl) playingEl.textContent = gameState.playingAs ? `Playing as ${gameState.playingAs}` : 'Playing as (choose a side)';
+
+            updateControlButtons();
         }
 
-        // Start
         window.onload = init;
     </script>
 </body>
