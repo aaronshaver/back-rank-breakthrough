@@ -753,7 +753,7 @@
 
         // White decision hierarchy:
         // 1) If possible, intercept black at its destination (capture at target square).
-        // 2) Else, proactively capture some other black piece (avoid occupying black's destination square).
+        // 2) Else, proactively capture some other black piece (NOT the planned mover; avoid occupying black's destination square).
         // 3) Else, mobilize a piece toward the center four squares (avoid occupying black's destination square).
         function whiteAI(blackPlan) {
             if (!blackPlan) return null;
@@ -809,7 +809,7 @@
 
             if (bestIntercept) return bestIntercept;
 
-            // ---- 2) Proactive capture elsewhere ----
+            // ---- 2) Proactive capture elsewhere (cannot capture the planned mover at its origin) ----
             let bestCapture = null;
             let bestCaptureScore = -Infinity;
 
@@ -825,8 +825,10 @@
                     const captured = move.capture;
                     if (!captured.alive || captured.color !== 'black') continue;
 
+                    // CRITICAL: Do NOT allow capturing the currently-planned mover on its origin square.
+                    if (captured === blackPlan.piece) continue;
+
                     let score = captured.getValue() * 120 + captured.y * 1.5 - piece.getValue() * 6;
-                    if (captured === blackPlan.piece) score += 40;
                     score += Math.random() * 0.25;
 
                     if (score > bestCaptureScore) {
@@ -949,7 +951,7 @@
                         whitePlan.piece.x = whitePlan.move.x;
                         whitePlan.piece.y = whitePlan.move.y;
                     } else if (whitePlan.kind === 'capture') {
-                        // White captures a black piece on its current square
+                        // White captures a black piece on its current square (must NOT be the planned mover)
                         if (whitePlan.move.capture && whitePlan.move.capture.alive) {
                             whitePlan.move.capture.alive = false;
                             if (whitePlan.move.capture === blackPlan.piece) {
