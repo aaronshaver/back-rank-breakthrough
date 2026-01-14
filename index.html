@@ -103,10 +103,16 @@
             padding: 10px;
             background-color: #333;
             border-radius: 4px;
-            font-size: 12px;
-            height: 80px;
-            overflow-y: auto;
+            font-size: 14px;          /* bigger overall */
+            line-height: 1.2;
+            height: 80px;             /* stays the same */
+            overflow: hidden;         /* no clipping via scroll; we fit text instead */
             word-wrap: break-word;
+        }
+
+        #statusText {
+            white-space: normal;
+            overflow-wrap: anywhere;
         }
 
         .btn-group-vertical {
@@ -115,13 +121,97 @@
 
         h4 {
             color: #ccc;
-            margin-bottom: 15px;
+            margin-bottom: 8px;
             border-bottom: 1px solid #444;
             padding-bottom: 10px;
+        }
+
+        #playingAs {
+            color: #bdbdbd;
+            font-size: 13px;
+            margin-bottom: 12px;
+            user-select: none;
+        }
+
+        /* Role dialog (custom modal) */
+        .role-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.65);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            z-index: 9999;
+        }
+
+        .role-overlay.hidden {
+            display: none;
+        }
+
+        .role-modal {
+            width: min(720px, 96vw);
+            background: #222;
+            border: 1px solid #444;
+            border-radius: 10px;
+            padding: 18px 18px 14px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+        }
+
+        .role-modal h5 {
+            margin: 0 0 10px 0;
+            color: #e6e6e6;
+        }
+
+        .role-section {
+            background: #2b2b2b;
+            border: 1px solid #3f3f3f;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+
+        .role-section p {
+            margin: 0 0 10px 0;
+            color: #e0e0e0;
+            line-height: 1.35;
+        }
+
+        .role-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
         }
     </style>
 </head>
 <body>
+    <!-- Role Selection Dialog -->
+    <div id="roleModalOverlay" class="role-overlay hidden" aria-modal="true" role="dialog">
+        <div class="role-modal">
+            <h5>Choose a side</h5>
+
+            <div class="role-section">
+                <p>
+                    The goal of the game for Black is to get as many pieces to reach the bottom row as possible.
+                    Black cannot capture pieces.
+                </p>
+                <div class="role-actions">
+                    <button class="btn btn-dark" id="playBlackBtn">Play as Black</button>
+                </div>
+            </div>
+
+            <div class="role-section">
+                <p>
+                    The goal of the game for White is to prevent Black pieces from reaching the bottom row, whether through
+                    capturing them as they land on a bottom row square, or through capturing them proactively beforehand on other rows.
+                </p>
+                <div class="role-actions">
+                    <button class="btn btn-light" id="playWhiteBtn">Play as White</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="game-container">
         <div class="canvas-wrapper">
             <canvas id="gameCanvas"></canvas>
@@ -129,6 +219,7 @@
 
         <div class="control-panel">
             <h4>Chess Tower Defense</h4>
+            <div id="playingAs">Playing as (choose a side)</div>
 
             <div class="score-display">
                 <div class="score-box" id="blackReachedBox">
@@ -150,7 +241,7 @@
             </div>
 
             <div class="status">
-                <div id="statusText">Click Start to begin simulation</div>
+                <div id="statusText">Click Start to begin</div>
             </div>
         </div>
     </div>
@@ -168,7 +259,7 @@
         const BLACK_PIECE_COLOR = '#1a1a1a';
         const BLACK_PIECE_OUTLINE = '#CCCCCC';
 
-        // Piece values
+        // Piece values (used for AI heuristics)
         const PIECE_VALUES = {
             'pawn': 1,
             'knight': 3,
@@ -186,15 +277,13 @@
         let gameState = {
             whitePieces: [],
             blackPieces: [],
-            whiteScore: 0,          // kept for internal logic/history
-            blackScore: 0,          // kept for internal logic/history
             blackReached: 0,        // count of black pieces that reached bottom row
-            turn: 0,                // kept internally (no UI)
             running: false,
             paused: false,
             delay: 1000,
             currentPlan: null,
-            currentCounter: null
+            currentCounter: null,
+            playingAs: null         // 'Black' or 'White'
         };
 
         // ============== PIECE CLASS ==============
@@ -260,6 +349,9 @@
             document.getElementById('startBtn').addEventListener('click', startGame);
             document.getElementById('pauseBtn').addEventListener('click', togglePause);
             document.getElementById('resetBtn').addEventListener('click', resetGame);
+
+            document.getElementById('playBlackBtn').addEventListener('click', () => chooseSide('Black'));
+            document.getElementById('playWhiteBtn').addEventListener('click', () => chooseSide('White'));
 
             resetGame();
         }
@@ -462,7 +554,7 @@
                     moves.push({ x: piece.x, y: newY, path: [{ x: piece.x, y: piece.y }, { x: piece.x, y: newY }] });
                 }
 
-                // Diagonal captures (only for white, not for black)
+                // Diagonal captures
                 if (!noCapture) {
                     for (const dx of [-1, 1]) {
                         const newX = piece.x + dx;
@@ -551,8 +643,6 @@
                 if (x >= 0 && x < BOARD_WIDTH && y >= 0 && y < BOARD_HEIGHT) {
                     const target = occupied.get(`${x},${y}`);
 
-                    // For black (noCapture), can only move to empty squares
-                    // For white, can move to empty or enemy squares
                     if (noCapture) {
                         if (!target) {
                             const path = [{ x: piece.x, y: piece.y }];
@@ -661,80 +751,138 @@
             return bestMove;
         }
 
+        // White decision hierarchy:
+        // 1) If possible, intercept black at its destination (capture at target square).
+        // 2) Else, proactively capture some other black piece (avoid occupying black's destination square).
+        // 3) Else, mobilize a piece toward the center four squares (avoid occupying black's destination square).
         function whiteAI(blackPlan) {
             if (!blackPlan) return null;
 
             const allPieces = [...gameState.whitePieces, ...gameState.blackPieces];
             const alivePieces = gameState.whitePieces.filter(p => p.alive);
-
             if (alivePieces.length === 0) return null;
 
-            // Target square is ONLY the final destination of black's move
             const targetX = blackPlan.move.x;
             const targetY = blackPlan.move.y;
 
-            let bestMove = null;
-            let bestScore = -Infinity;
+            // ---- 1) Intercept attempt ----
+            let bestIntercept = null;
+            let bestInterceptScore = -Infinity;
 
             for (const piece of alivePieces) {
-
-                // ---- FIX: white pawns may only "capture" (intercept) diagonally ----
+                // Pawns: only allow interception diagonally forward (do NOT allow straight-forward "capture")
                 if (piece.type === 'pawn') {
-                    const direction = piece.color === 'black' ? 1 : -1; // white = -1
+                    const direction = -1; // white = -1
                     const dx = targetX - piece.x;
                     const dy = targetY - piece.y;
 
-                    // Only allow pawn interception if the target is one step diagonally forward
                     if (Math.abs(dx) === 1 && dy === direction) {
                         const score = 1000 + blackPlan.piece.getValue() * 100 - piece.getValue();
-                        if (score > bestScore) {
-                            bestScore = score;
-                            bestMove = {
+                        if (score > bestInterceptScore) {
+                            bestInterceptScore = score;
+                            bestIntercept = {
+                                kind: 'intercept',
                                 piece,
                                 move: {
                                     x: targetX,
                                     y: targetY,
                                     path: [{ x: piece.x, y: piece.y }, { x: targetX, y: targetY }]
-                                },
-                                intercepting: true
+                                }
                             };
                         }
                     }
-
-                    // Prevent pawns from "capturing" by moving straight forward
                     continue;
                 }
-                // -------------------------------------------------------------------
 
-                // White CAN capture, so pass false for noCapture
+                const moves = getValidMoves(piece, allPieces, false);
+                for (const move of moves) {
+                    if (move.x === targetX && move.y === targetY) {
+                        let score = 1000 + blackPlan.piece.getValue() * 100;
+                        score -= piece.getValue(); // prefer lower-value interceptors
+                        if (score > bestInterceptScore) {
+                            bestInterceptScore = score;
+                            bestIntercept = { kind: 'intercept', piece, move };
+                        }
+                    }
+                }
+            }
+
+            if (bestIntercept) return bestIntercept;
+
+            // ---- 2) Proactive capture elsewhere ----
+            let bestCapture = null;
+            let bestCaptureScore = -Infinity;
+
+            for (const piece of alivePieces) {
                 const moves = getValidMoves(piece, allPieces, false);
 
                 for (const move of moves) {
-                    let score = 0;
+                    if (!move.capture) continue;
 
-                    // Check if this move lands on the EXACT target square where black will end up
-                    // This is the ONLY way white can intercept
-                    if (move.x === targetX && move.y === targetY) {
-                        // This is a valid interception - white meets black at the target
-                        score = 1000 + blackPlan.piece.getValue() * 100;
+                    // Avoid stepping onto black's planned destination square (would invalidate black move).
+                    if (move.x === targetX && move.y === targetY) continue;
 
-                        // Prefer using less valuable pieces for interception
-                        score -= piece.getValue();
-                    }
+                    const captured = move.capture;
+                    if (!captured.alive || captured.color !== 'black') continue;
 
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestMove = { piece, move, intercepting: score >= 1000 };
+                    let score = captured.getValue() * 120 + captured.y * 1.5 - piece.getValue() * 6;
+                    if (captured === blackPlan.piece) score += 40;
+                    score += Math.random() * 0.25;
+
+                    if (score > bestCaptureScore) {
+                        bestCaptureScore = score;
+                        bestCapture = { kind: 'capture', piece, move };
                     }
                 }
             }
 
-            // If no interception possible, don't move (or could implement other strategies)
-            if (bestScore < 1000) {
-                return null;
+            if (bestCapture) return bestCapture;
+
+            // ---- 3) Mobilize toward center four squares ----
+            const centers = [
+                { x: 7, y: 7 }, { x: 8, y: 7 },
+                { x: 7, y: 8 }, { x: 8, y: 8 }
+            ];
+
+            const distToCenter = (x, y) => {
+                let best = Infinity;
+                for (const c of centers) {
+                    const d = Math.abs(x - c.x) + Math.abs(y - c.y);
+                    if (d < best) best = d;
+                }
+                return best;
+            };
+
+            let bestMobilize = null;
+            let bestMobilizeScore = -Infinity;
+
+            for (const piece of alivePieces) {
+                const moves = getValidMoves(piece, allPieces, false);
+                const curDist = distToCenter(piece.x, piece.y);
+
+                for (const move of moves) {
+                    if (move.capture) continue;
+
+                    // Avoid stepping onto black's planned destination square (would invalidate black move).
+                    if (move.x === targetX && move.y === targetY) continue;
+
+                    const newDist = distToCenter(move.x, move.y);
+                    const improvement = curDist - newDist;
+
+                    let score = improvement * 20 - newDist * 0.5;
+                    if (piece.type !== 'pawn') score += 1.0;
+                    score += Math.random() * 0.2;
+
+                    if (score > bestMobilizeScore) {
+                        bestMobilizeScore = score;
+                        bestMobilize = { kind: 'mobilize', piece, move };
+                    }
+                }
             }
 
-            return bestMove;
+            if (bestMobilize) return bestMobilize;
+
+            return null;
         }
 
         // ============== GAME LOOP ==============
@@ -744,9 +892,6 @@
                     await sleep(100);
                     continue;
                 }
-
-                gameState.turn++;
-                updateUI();
 
                 // Check if game should end
                 const blackAlive = gameState.blackPieces.filter(p => p.alive).length;
@@ -772,12 +917,20 @@
 
                 if (!gameState.running) break;
 
-                // White counters
+                // White responds (intercept, capture elsewhere, or mobilize)
                 const whitePlan = whiteAI(blackPlan);
-                if (whitePlan && whitePlan.intercepting) {
+                if (whitePlan) {
                     gameState.currentCounter = whitePlan.move;
                     draw();
-                    setStatus(`White ${whitePlan.piece.type} captures at (${whitePlan.move.x},${whitePlan.move.y})`);
+
+                    if (whitePlan.kind === 'intercept') {
+                        setStatus(`White ${whitePlan.piece.type} captures at (${whitePlan.move.x},${whitePlan.move.y})`);
+                    } else if (whitePlan.kind === 'capture') {
+                        setStatus(`White ${whitePlan.piece.type} captures black ${whitePlan.move.capture.type} at (${whitePlan.move.x},${whitePlan.move.y})`);
+                    } else if (whitePlan.kind === 'mobilize') {
+                        setStatus(`White mobilizes piece toward board center`);
+                    }
+
                     await sleep(gameState.delay);
                 }
 
@@ -786,31 +939,45 @@
                 // Resolve moves
                 let blackCaptured = false;
 
-                // Check if white intercepts black at the TARGET square only
-                if (whitePlan && whitePlan.intercepting) {
-                    // White captures black by meeting at the target square
-                    blackPlan.piece.alive = false;
-                    gameState.whiteScore += blackPlan.piece.getValue();
-                    blackCaptured = true;
+                if (whitePlan) {
+                    if (whitePlan.kind === 'intercept') {
+                        // White captures the planned black mover by meeting it at the destination square
+                        blackPlan.piece.alive = false;
+                        blackCaptured = true;
 
-                    // Move white piece to the capture point
-                    whitePlan.piece.x = whitePlan.move.x;
-                    whitePlan.piece.y = whitePlan.move.y;
+                        // Move white piece to the capture point
+                        whitePlan.piece.x = whitePlan.move.x;
+                        whitePlan.piece.y = whitePlan.move.y;
+                    } else if (whitePlan.kind === 'capture') {
+                        // White captures a black piece on its current square
+                        if (whitePlan.move.capture && whitePlan.move.capture.alive) {
+                            whitePlan.move.capture.alive = false;
+                            if (whitePlan.move.capture === blackPlan.piece) {
+                                blackCaptured = true;
+                            }
+                        }
+
+                        // Move white piece to the capture square
+                        whitePlan.piece.x = whitePlan.move.x;
+                        whitePlan.piece.y = whitePlan.move.y;
+                    } else if (whitePlan.kind === 'mobilize') {
+                        // White simply moves toward center
+                        whitePlan.piece.x = whitePlan.move.x;
+                        whitePlan.piece.y = whitePlan.move.y;
+                    }
                 }
 
                 // Execute black's move if not captured
                 if (!blackCaptured) {
-                    // Black moves (no captures allowed for black)
                     blackPlan.piece.x = blackPlan.move.x;
                     blackPlan.piece.y = blackPlan.move.y;
 
                     // Check if black reached back rank
                     if (blackPlan.piece.y === BOARD_HEIGHT - 1) {
                         gameState.blackReached += 1;
-                        gameState.blackScore += blackPlan.piece.getValue(); // kept internally
                         blackPlan.piece.alive = false;
                         flashBlackReachedBox();
-                        setStatus(`Black ${blackPlan.piece.type} reached bottom row. +1`);
+                        setStatus(`Black ${blackPlan.piece.type} reached bottom row`);
                     }
                 }
 
@@ -837,8 +1004,32 @@
             if (el) el.textContent = gameState.blackReached;
         }
 
+        function fitStatusText() {
+            const box = document.querySelector('.status');
+            const el = document.getElementById('statusText');
+            if (!box || !el) return;
+
+            // Reset to base (bigger overall)
+            let size = 14;
+            const minSize = 10;
+
+            el.style.fontSize = size + 'px';
+
+            // Shrink until it fits (no clipping)
+            // Guard against pathological loops
+            let guard = 0;
+            while (el.scrollHeight > box.clientHeight && size > minSize && guard < 60) {
+                size -= 0.5;
+                el.style.fontSize = size + 'px';
+                guard++;
+            }
+        }
+
         function setStatus(text) {
-            document.getElementById('statusText').textContent = text;
+            const el = document.getElementById('statusText');
+            if (!el) return;
+            el.textContent = text;
+            fitStatusText();
         }
 
         function flashBlackReachedBox() {
@@ -868,13 +1059,27 @@
             setStatus(gameState.paused ? 'Paused' : 'Resumed');
         }
 
+        function showRoleDialog() {
+            const overlay = document.getElementById('roleModalOverlay');
+            if (overlay) overlay.classList.remove('hidden');
+        }
+
+        function hideRoleDialog() {
+            const overlay = document.getElementById('roleModalOverlay');
+            if (overlay) overlay.classList.add('hidden');
+        }
+
+        function chooseSide(color) {
+            gameState.playingAs = color;
+            const el = document.getElementById('playingAs');
+            if (el) el.textContent = `Playing as ${color}`;
+            hideRoleDialog();
+        }
+
         function resetGame() {
             gameState.running = false;
             gameState.paused = false;
-            gameState.whiteScore = 0;
-            gameState.blackScore = 0;
             gameState.blackReached = 0;
-            gameState.turn = 0;
             gameState.currentPlan = null;
             gameState.currentCounter = null;
 
@@ -882,6 +1087,10 @@
             updateUI();
             draw();
             setStatus('Click Start to begin');
+
+            showRoleDialog();
+            const playingEl = document.getElementById('playingAs');
+            if (playingEl) playingEl.textContent = gameState.playingAs ? `Playing as ${gameState.playingAs}` : 'Playing as (choose a side)';
         }
 
         // Start
