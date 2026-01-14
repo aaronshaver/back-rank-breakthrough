@@ -1,2 +1,5 @@
 # chess-tower-defense
-Black tries to reach the bottom rank; White tries to stop Black
+
+Run it here: https://aaronshaver.github.io/chess-tower-defense
+
+Known bug: right now White pawns are able to capture by advancing forward, which is incorrect. They should only be able to capture diagonally.
