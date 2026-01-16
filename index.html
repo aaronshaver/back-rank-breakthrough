@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chess Tower Defense</title>
+    <title>Back Rank Breakthrough</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         * {
@@ -103,10 +103,10 @@
             padding: 10px;
             background-color: #333;
             border-radius: 4px;
-            font-size: 14px;          /* bigger overall */
+            font-size: 14px;
             line-height: 1.2;
-            height: 80px;             /* stays the same */
-            overflow: hidden;         /* no clipping via scroll; we fit text instead */
+            height: 80px;
+            overflow: hidden;
             word-wrap: break-word;
         }
 
@@ -133,13 +133,11 @@
             user-select: none;
         }
 
-        /* Selected state for started/paused */
         .btn-state-on {
             outline: 2px solid rgba(255,255,255,0.35);
             box-shadow: 0 0 10px rgba(255,255,255,0.18);
         }
 
-        /* Role dialog (custom modal) */
         .role-overlay {
             position: fixed;
             inset: 0;
@@ -188,6 +186,56 @@
             gap: 10px;
             flex-wrap: wrap;
         }
+
+        /* Piece placement UI */
+        .piece-counts {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #333;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .piece-counts-title {
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #aaa;
+        }
+
+        .piece-counts-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 5px;
+        }
+
+        .piece-count-item {
+            background: #444;
+            padding: 4px 8px;
+            border-radius: 3px;
+            text-align: center;
+            transition: box-shadow 200ms ease;
+        }
+
+        .piece-count-item.empty {
+            opacity: 0.5;
+        }
+
+        .piece-count-item.count-flash {
+            box-shadow:
+                0 0 8px rgba(255, 215, 0, 0.6),
+                0 0 14px rgba(255, 215, 0, 0.3);
+        }
+
+        .placement-hint {
+            margin-top: 8px;
+            font-size: 11px;
+            color: #888;
+            text-align: center;
+        }
+
+        .piece-counts.hidden {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -224,17 +272,17 @@
         </div>
 
         <div class="control-panel">
-            <h4>Chess Tower Defense</h4>
+            <h4>Back Rank Breakthrough</h4>
             <div id="playingAs">Playing as (choose a side)</div>
 
             <div class="score-display">
                 <div class="score-box" id="blackReachedBox">
-                    <strong id="blackReachedCount">0</strong> Black Pieces Reached the Bottom Row
+                    <strong id="blackReachedCount">0</strong> <span id="blackReachedText">Black Pieces Reached the Bottom Row</span>
                 </div>
             </div>
 
             <div class="control-group">
-                <label for="delaySlider">Animation Delay</label>
+                <label for="delaySlider">Game Speed</label>
                 <input type="range" class="form-range" id="delaySlider"
                        min="0" max="3000" step="100" value="1000">
                 <div class="delay-value"><span id="delayValue">1000</span> ms</div>
@@ -242,12 +290,30 @@
 
             <div class="btn-group-vertical" role="group">
                 <button class="btn btn-success" id="startBtn">Start</button>
-                <button class="btn btn-warning" id="pauseBtn">Pause</button>
+                <button class="btn btn-warning" id="pauseBtn" disabled>Pause</button>
                 <button class="btn btn-danger" id="resetBtn">Reset</button>
             </div>
 
             <div class="status">
-                <div id="statusText">Click Start to begin</div>
+                <div id="statusText">Choose a side to begin</div>
+            </div>
+
+            <!-- Piece counts display -->
+            <div class="piece-counts hidden" id="pieceCountsPanel">
+                <div class="piece-counts-title">Pieces to Place</div>
+                <div class="piece-counts-grid">
+                    <div class="piece-count-item" id="countK">K: <span>0</span></div>
+                    <div class="piece-count-item" id="countQ">Q: <span>0</span></div>
+                    <div class="piece-count-item" id="countR">R: <span>0</span></div>
+                    <div class="piece-count-item" id="countB">B: <span>0</span></div>
+                    <div class="piece-count-item" id="countN">N: <span>0</span></div>
+                    <div class="piece-count-item" id="countP">P: <span>0</span></div>
+                </div>
+                <div class="placement-hint">
+                    WASD to move cursor<br>
+                    P/N/B/R/Q/K to place pieces<br>
+                    X to remove a piece
+                </div>
             </div>
         </div>
     </div>
@@ -265,6 +331,13 @@
         const BLACK_PIECE_COLOR = '#1a1a1a';
         const BLACK_PIECE_OUTLINE = '#CCCCCC';
 
+        // Fog of war colors
+        const FOG_LIGHT = '#a0a0a0';
+        const FOG_DARK = '#707070';
+
+        // Placement zone outline color
+        const PLACEMENT_ZONE_COLOR = '#4488ff';
+
         // Piece values (used for AI heuristics)
         const PIECE_VALUES = {
             'pawn': 1,
@@ -279,18 +352,54 @@
         let canvas, ctx;
         let squareSize;
         let flashTimeout = null;
+        let pieceCountFlashTimeouts = {};
 
         let gameState = {
             whitePieces: [],
             blackPieces: [],
-            blackReached: 0,        // count of black pieces that reached bottom row
+            blackReached: 0,
             running: false,
             paused: false,
+            gameComplete: false,
             delay: 1000,
             currentPlan: null,
             currentCounter: null,
-            playingAs: null,        // 'Black' or 'White'
-            blackMoveHistory: []    // executed moves only (for repeat-avoidance)
+            playingAs: null,
+            blackMoveHistory: [],
+            // Placement phase state
+            placementPhase: false,
+            cursorX: 7,
+            cursorY: 7,
+            piecesToPlace: {
+                king: 0,
+                queen: 0,
+                rook: 0,
+                bishop: 0,
+                knight: 0,
+                pawn: 0
+            },
+            // Track if side has been chosen (to know when to show empty board vs placed pieces)
+            sideChosen: false
+        };
+
+        // Key to piece type mapping
+        const KEY_TO_PIECE = {
+            'p': 'pawn',
+            'n': 'knight',
+            'b': 'bishop',
+            'r': 'rook',
+            'q': 'queen',
+            'k': 'king'
+        };
+
+        // Piece type to count element ID mapping
+        const PIECE_TO_COUNT_ID = {
+            'pawn': 'countP',
+            'knight': 'countN',
+            'bishop': 'countB',
+            'rook': 'countR',
+            'queen': 'countQ',
+            'king': 'countK'
         };
 
         // ============== PIECE CLASS ==============
@@ -348,7 +457,6 @@
             // Event listeners
             document.getElementById('delaySlider').addEventListener('input', (e) => {
                 let value = parseInt(e.target.value);
-                // If slider is at 0, use 1ms delay
                 gameState.delay = value === 0 ? 1 : value;
                 document.getElementById('delayValue').textContent = gameState.delay;
             });
@@ -360,6 +468,9 @@
             document.getElementById('playBlackBtn').addEventListener('click', () => chooseSide('Black'));
             document.getElementById('playWhiteBtn').addEventListener('click', () => chooseSide('White'));
 
+            // Keyboard listener for placement
+            document.addEventListener('keydown', handleKeyDown);
+
             resetGame();
         }
 
@@ -370,33 +481,229 @@
             draw();
         }
 
-        function spawnPieces() {
-            gameState.whitePieces = [];
-            gameState.blackPieces = [];
+        function handleKeyDown(e) {
+            if (!gameState.placementPhase) return;
 
-            // Standard chess piece counts
+            const key = e.key.toLowerCase();
+
+            // Movement with WASD
+            if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
+                e.preventDefault();
+                moveCursor(key);
+                draw();
+                return;
+            }
+
+            // Piece placement
+            if (KEY_TO_PIECE[key]) {
+                e.preventDefault();
+                placePiece(KEY_TO_PIECE[key]);
+                return;
+            }
+
+            // Piece deletion
+            if (key === 'x') {
+                e.preventDefault();
+                deletePiece();
+                return;
+            }
+        }
+
+        function moveCursor(direction) {
+            const bounds = getPlayerBounds();
+
+            switch (direction) {
+                case 'w':
+                    if (gameState.cursorY > bounds.minY) {
+                        gameState.cursorY--;
+                    }
+                    break;
+                case 's':
+                    if (gameState.cursorY < bounds.maxY) {
+                        gameState.cursorY++;
+                    }
+                    break;
+                case 'a':
+                    if (gameState.cursorX > 0) {
+                        gameState.cursorX--;
+                    }
+                    break;
+                case 'd':
+                    if (gameState.cursorX < BOARD_WIDTH - 1) {
+                        gameState.cursorX++;
+                    }
+                    break;
+            }
+        }
+
+        function getPlayerBounds() {
+            if (gameState.playingAs === 'Black') {
+                return { minY: 0, maxY: 5 };
+            } else {
+                return { minY: BOARD_HEIGHT - 3, maxY: BOARD_HEIGHT - 1 };
+            }
+        }
+
+        function flashPieceCount(pieceType) {
+            const elementId = PIECE_TO_COUNT_ID[pieceType];
+            if (!elementId) return;
+
+            const element = document.getElementById(elementId);
+            if (!element) return;
+
+            element.classList.add('count-flash');
+
+            // Clear existing timeout for this piece type
+            if (pieceCountFlashTimeouts[pieceType]) {
+                clearTimeout(pieceCountFlashTimeouts[pieceType]);
+            }
+
+            pieceCountFlashTimeouts[pieceType] = setTimeout(() => {
+                element.classList.remove('count-flash');
+                delete pieceCountFlashTimeouts[pieceType];
+            }, 260);
+        }
+
+        function placePiece(pieceType) {
+            // Check if we have pieces of this type to place
+            if (gameState.piecesToPlace[pieceType] <= 0) {
+                setStatus(`No more ${pieceType}s to place!`);
+                return;
+            }
+
+            // Check if square is already occupied by player's pieces
+            const playerPieces = gameState.playingAs === 'White' ? gameState.whitePieces : gameState.blackPieces;
+            const occupied = playerPieces.some(p => p.alive && p.x === gameState.cursorX && p.y === gameState.cursorY);
+
+            if (occupied) {
+                setStatus('Square already occupied!');
+                return;
+            }
+
+            // Place the piece
+            const color = gameState.playingAs.toLowerCase();
+            const newPiece = new Piece(pieceType, color, gameState.cursorX, gameState.cursorY);
+
+            if (color === 'white') {
+                gameState.whitePieces.push(newPiece);
+            } else {
+                gameState.blackPieces.push(newPiece);
+            }
+
+            gameState.piecesToPlace[pieceType]--;
+
+            updatePieceCountsUI();
+            flashPieceCount(pieceType);
+            draw();
+
+            // Check if all pieces placed
+            const totalRemaining = Object.values(gameState.piecesToPlace).reduce((a, b) => a + b, 0);
+            if (totalRemaining === 0) {
+                document.getElementById('startBtn').disabled = false;
+                setStatus('All pieces placed! Click Start to begin.');
+            } else {
+                setStatus(`Placed ${pieceType}. ${totalRemaining} pieces remaining.`);
+            }
+        }
+
+        function deletePiece() {
+            // Find piece at cursor position belonging to player
+            const playerPieces = gameState.playingAs === 'White' ? gameState.whitePieces : gameState.blackPieces;
+            const pieceIndex = playerPieces.findIndex(p => p.alive && p.x === gameState.cursorX && p.y === gameState.cursorY);
+
+            if (pieceIndex === -1) {
+                setStatus('No piece to remove here.');
+                return;
+            }
+
+            const piece = playerPieces[pieceIndex];
+            const pieceType = piece.type;
+
+            // Remove the piece
+            playerPieces.splice(pieceIndex, 1);
+
+            // Add back to pieces to place
+            gameState.piecesToPlace[pieceType]++;
+
+            // Disable start button if we now have pieces to place
+            const totalRemaining = Object.values(gameState.piecesToPlace).reduce((a, b) => a + b, 0);
+            if (totalRemaining > 0) {
+                document.getElementById('startBtn').disabled = true;
+            }
+
+            updatePieceCountsUI();
+            flashPieceCount(pieceType);
+            draw();
+            setStatus(`Removed ${pieceType}. ${totalRemaining} pieces remaining.`);
+        }
+
+        function initializePiecesToPlace() {
+            if (gameState.playingAs === 'White') {
+                // White gets one standard chess set
+                gameState.piecesToPlace = {
+                    king: 1,
+                    queen: 1,
+                    rook: 2,
+                    bishop: 2,
+                    knight: 2,
+                    pawn: 8
+                };
+            } else {
+                // Black gets two standard chess sets
+                gameState.piecesToPlace = {
+                    king: 2,
+                    queen: 2,
+                    rook: 4,
+                    bishop: 4,
+                    knight: 4,
+                    pawn: 16
+                };
+            }
+        }
+
+        function updatePieceCountsUI() {
+            document.querySelector('#countK span').textContent = gameState.piecesToPlace.king;
+            document.querySelector('#countQ span').textContent = gameState.piecesToPlace.queen;
+            document.querySelector('#countR span').textContent = gameState.piecesToPlace.rook;
+            document.querySelector('#countB span').textContent = gameState.piecesToPlace.bishop;
+            document.querySelector('#countN span').textContent = gameState.piecesToPlace.knight;
+            document.querySelector('#countP span').textContent = gameState.piecesToPlace.pawn;
+
+            // Update styling for empty counts
+            document.getElementById('countK').classList.toggle('empty', gameState.piecesToPlace.king === 0);
+            document.getElementById('countQ').classList.toggle('empty', gameState.piecesToPlace.queen === 0);
+            document.getElementById('countR').classList.toggle('empty', gameState.piecesToPlace.rook === 0);
+            document.getElementById('countB').classList.toggle('empty', gameState.piecesToPlace.bishop === 0);
+            document.getElementById('countN').classList.toggle('empty', gameState.piecesToPlace.knight === 0);
+            document.getElementById('countP').classList.toggle('empty', gameState.piecesToPlace.pawn === 0);
+        }
+
+        function spawnOpponentPieces() {
+            // Only spawn pieces for the side the player is NOT playing
             const pieceTypes = [
                 'rook', 'knight', 'bishop', 'queen', 'king', 'bishop', 'knight', 'rook',
                 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn'
             ];
 
-            // Spawn white pieces in lower 3 rows (rows 13-15 for 16-row board)
-            const whiteStartRow = BOARD_HEIGHT - 3;
-            const whitePositions = getRandomPositions(16, whiteStartRow, BOARD_HEIGHT - 1);
-            pieceTypes.forEach((type, i) => {
-                gameState.whitePieces.push(new Piece(type, 'white', whitePositions[i].x, whitePositions[i].y));
-            });
-
-            // Spawn TWO sets of black pieces in upper 6 rows (rows 0-5)
-            const blackPositions = getRandomPositions(32, 0, 5);
-            // First set
-            pieceTypes.forEach((type, i) => {
-                gameState.blackPieces.push(new Piece(type, 'black', blackPositions[i].x, blackPositions[i].y));
-            });
-            // Second set
-            pieceTypes.forEach((type, i) => {
-                gameState.blackPieces.push(new Piece(type, 'black', blackPositions[i + 16].x, blackPositions[i + 16].y));
-            });
+            if (gameState.playingAs === 'Black') {
+                // Spawn white pieces randomly
+                gameState.whitePieces = [];
+                const whiteStartRow = BOARD_HEIGHT - 3;
+                const whitePositions = getRandomPositions(16, whiteStartRow, BOARD_HEIGHT - 1);
+                pieceTypes.forEach((type, i) => {
+                    gameState.whitePieces.push(new Piece(type, 'white', whitePositions[i].x, whitePositions[i].y));
+                });
+            } else {
+                // Spawn black pieces randomly (two sets)
+                gameState.blackPieces = [];
+                const blackPositions = getRandomPositions(32, 0, 5);
+                pieceTypes.forEach((type, i) => {
+                    gameState.blackPieces.push(new Piece(type, 'black', blackPositions[i].x, blackPositions[i].y));
+                });
+                pieceTypes.forEach((type, i) => {
+                    gameState.blackPieces.push(new Piece(type, 'black', blackPositions[i + 16].x, blackPositions[i + 16].y));
+                });
+            }
         }
 
         function getRandomPositions(count, minRow, maxRow) {
@@ -429,14 +736,52 @@
             for (let y = 0; y < BOARD_HEIGHT; y++) {
                 for (let x = 0; x < BOARD_WIDTH; x++) {
                     const isLight = (x + y) % 2 === 0;
-                    ctx.fillStyle = isLight ? LIGHT_SQUARE : DARK_SQUARE;
+
+                    // Check if this square should be fog
+                    let isFog = false;
+                    if (gameState.placementPhase && gameState.playingAs) {
+                        if (gameState.playingAs === 'White') {
+                            // Fog on top 6 rows (black's area)
+                            isFog = y <= 5;
+                        } else {
+                            // Fog on bottom 3 rows (white's area)
+                            isFog = y >= BOARD_HEIGHT - 3;
+                        }
+                    }
+
+                    if (isFog) {
+                        ctx.fillStyle = isLight ? FOG_LIGHT : FOG_DARK;
+                    } else {
+                        ctx.fillStyle = isLight ? LIGHT_SQUARE : DARK_SQUARE;
+                    }
                     ctx.fillRect(x * squareSize, y * squareSize, squareSize, squareSize);
                 }
             }
 
+            // Draw placement zone outline during placement phase
+            if (gameState.placementPhase) {
+                drawPlacementZone();
+            }
+
+            // Draw cursor during placement phase
+            if (gameState.placementPhase) {
+                drawCursor();
+            }
+
             // Draw pieces
-            gameState.whitePieces.filter(p => p.alive).forEach(p => drawPiece(p));
-            gameState.blackPieces.filter(p => p.alive).forEach(p => drawPiece(p));
+            if (gameState.placementPhase) {
+                // Only draw player's placed pieces during placement
+                if (gameState.playingAs === 'White') {
+                    gameState.whitePieces.filter(p => p.alive).forEach(p => drawPiece(p));
+                } else {
+                    gameState.blackPieces.filter(p => p.alive).forEach(p => drawPiece(p));
+                }
+            } else if (gameState.sideChosen) {
+                // Draw all pieces after placement is done
+                gameState.whitePieces.filter(p => p.alive).forEach(p => drawPiece(p));
+                gameState.blackPieces.filter(p => p.alive).forEach(p => drawPiece(p));
+            }
+            // If side not chosen, draw empty board (no pieces)
 
             // Draw plan lines
             if (gameState.currentPlan) {
@@ -445,6 +790,29 @@
             if (gameState.currentCounter) {
                 drawPlan(gameState.currentCounter, '#44ff44', '#00ff00', squareSize * 0.4);
             }
+        }
+
+        function drawPlacementZone() {
+            const bounds = getPlayerBounds();
+
+            ctx.strokeStyle = PLACEMENT_ZONE_COLOR;
+            ctx.lineWidth = 2;
+
+            const x = 0;
+            const y = bounds.minY * squareSize;
+            const width = BOARD_WIDTH * squareSize;
+            const height = (bounds.maxY - bounds.minY + 1) * squareSize;
+
+            ctx.strokeRect(x + 1, y + 1, width - 2, height - 2);
+        }
+
+        function drawCursor() {
+            const x = gameState.cursorX * squareSize;
+            const y = gameState.cursorY * squareSize;
+
+            ctx.strokeStyle = '#4488ff';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(x + 2, y + 2, squareSize - 4, squareSize - 4);
         }
 
         function drawPiece(piece) {
@@ -520,7 +888,7 @@
                 case 'pawn':
                     moves.push(...getPawnMoves(piece, occupied, isBlack));
                     break;
-                case 'r ook':
+                case 'rook':
                     moves.push(...getRookMoves(piece, occupied, isBlack));
                     break;
                 case 'knight':
@@ -535,12 +903,6 @@
                     break;
                 case 'king':
                     moves.push(...getKingMoves(piece, occupied, isBlack));
-                    break;
-                default:
-                    // Handle rook (fix for typo above)
-                    if (piece.type === 'rook') {
-                        moves.push(...getRookMoves(piece, occupied, isBlack));
-                    }
                     break;
             }
 
@@ -729,7 +1091,6 @@
         function openFileToBottomScore(occ, x, y) {
             const bottomY = BOARD_HEIGHT - 1;
             if (y >= bottomY) return 0;
-            // bottom square must be empty
             if (occ.has(`${x},${bottomY}`)) return 0;
             for (let yy = y + 1; yy < bottomY; yy++) {
                 if (occ.has(`${x},${yy}`)) return 0;
@@ -750,7 +1111,6 @@
                 while (cx >= 0 && cx < BOARD_WIDTH && cy >= 0 && cy < BOARD_HEIGHT) {
                     if (occ.has(`${cx},${cy}`)) break;
                     if (cy === bottomY) {
-                        // bottom square is empty by virtue of occ check above
                         const dist = bottomY - y;
                         best = Math.max(best, 22 + dist * 2);
                         break;
@@ -783,7 +1143,6 @@
 
             const TYPE_ORDER = ['queen', 'rook', 'bishop', 'knight', 'king', 'pawn'];
 
-            // Try with repeat-avoidance first; if everything gets skipped, fall back allowing repeats.
             for (let pass = 0; pass < 2; pass++) {
                 const enforceRepeatAvoid = (pass === 0);
 
@@ -801,18 +1160,14 @@
                             const fromX = piece.x, fromY = piece.y;
                             const toX = move.x, toY = move.y;
 
-                            // Base: progress
                             let score = toY;
 
-                            // Huge: reach bottom
                             if (toY === BOARD_HEIGHT - 1) {
                                 score += 100 + piece.getValue() * 10;
                             }
 
-                            // Preference for higher-value mobility
                             score += piece.getValue() * 0.5;
 
-                            // NEW: "open lane next turn" heuristic
                             const occAfter = buildOccupiedMapAfterBlackMove(allPieces, piece, fromX, fromY, toX, toY);
                             if (piece.type === 'rook') {
                                 score += openFileToBottomScore(occAfter, toX, toY);
@@ -823,12 +1178,10 @@
                                 score += openDiagonalToBottomScore(occAfter, toX, toY);
                             }
 
-                            // Light randomness
                             score += Math.random() * 0.5;
 
                             const candidate = { piece, move, fromX, fromY, toX, toY };
 
-                            // NEW: avoid repeating the second-to-last executed move (piece + coords)
                             if (enforceRepeatAvoid && wouldRepeatSecondToLast(candidate)) {
                                 continue;
                             }
@@ -841,20 +1194,12 @@
                     }
 
                     if (bestMove) return bestMove;
-
-                    // If best for this type was skipped due to repeat-avoidance, try next lower type (continue loop)
                 }
-
-                // pass 1: allow repeats if needed
             }
 
             return null;
         }
 
-        // White decision hierarchy:
-        // 1) If possible, intercept black at its destination (capture at target square).
-        // 2) Else, proactively capture some other black piece (NOT the planned mover; avoid occupying black's destination square).
-        // 3) Else, mobilize a piece toward the center four squares (avoid occupying black's destination square).
         function whiteAI(blackPlan) {
             if (!blackPlan) return null;
 
@@ -865,13 +1210,13 @@
             const targetX = blackPlan.move.x;
             const targetY = blackPlan.move.y;
 
-            // ---- 1) Intercept attempt ----
+            // 1) Intercept attempt
             let bestIntercept = null;
             let bestInterceptScore = -Infinity;
 
             for (const piece of alivePieces) {
                 if (piece.type === 'pawn') {
-                    const direction = -1; // white = -1
+                    const direction = -1;
                     const dx = targetX - piece.x;
                     const dy = targetY - piece.y;
 
@@ -908,7 +1253,7 @@
 
             if (bestIntercept) return bestIntercept;
 
-            // ---- 2) Proactive capture elsewhere (cannot capture the planned mover at its origin) ----
+            // 2) Proactive capture elsewhere
             let bestCapture = null;
             let bestCaptureScore = -Infinity;
 
@@ -937,7 +1282,7 @@
 
             if (bestCapture) return bestCapture;
 
-            // ---- 3) Mobilize toward center four squares ----
+            // 3) Mobilize toward center
             const centers = [
                 { x: 7, y: 7 }, { x: 8, y: 7 },
                 { x: 7, y: 8 }, { x: 8, y: 8 }
@@ -994,6 +1339,7 @@
                 if (blackAlive === 0) {
                     setStatus('Game Complete');
                     gameState.running = false;
+                    gameState.gameComplete = true;
                     updateControlButtons();
                     break;
                 }
@@ -1002,6 +1348,7 @@
                 if (!blackPlan) {
                     setStatus('Game Complete');
                     gameState.running = false;
+                    gameState.gameComplete = true;
                     updateControlButtons();
                     break;
                 }
@@ -1058,7 +1405,6 @@
                 }
 
                 if (!blackCaptured) {
-                    // record executed black move BEFORE changing piece coords
                     const executed = {
                         piece: blackPlan.piece,
                         fromX: blackPlan.piece.x,
@@ -1099,8 +1445,13 @@
 
         // ============== UI ==============
         function updateUI() {
-            const el = document.getElementById('blackReachedCount');
-            if (el) el.textContent = gameState.blackReached;
+            const countEl = document.getElementById('blackReachedCount');
+            const textEl = document.getElementById('blackReachedText');
+            if (countEl) countEl.textContent = gameState.blackReached;
+            if (textEl) {
+                const pieceWord = gameState.blackReached === 1 ? 'Piece' : 'Pieces';
+                textEl.textContent = `Black ${pieceWord} Reached the Bottom Row`;
+            }
         }
 
         function fitStatusText() {
@@ -1146,21 +1497,55 @@
             const pauseBtn = document.getElementById('pauseBtn');
             if (!startBtn || !pauseBtn) return;
 
+            // Disable both buttons if game is complete
+            if (gameState.gameComplete) {
+                startBtn.disabled = true;
+                pauseBtn.disabled = true;
+                startBtn.classList.remove('btn-state-on');
+                pauseBtn.classList.remove('btn-state-on');
+                return;
+            }
+
+            // Disable pause during placement phase
+            if (gameState.placementPhase) {
+                pauseBtn.disabled = true;
+            } else if (gameState.running) {
+                pauseBtn.disabled = false;
+            }
+
             startBtn.classList.toggle('btn-state-on', !!gameState.running);
             pauseBtn.classList.toggle('btn-state-on', !!(gameState.running && gameState.paused));
         }
 
         function startGame() {
+            // Don't start if game is complete
+            if (gameState.gameComplete) return;
+
+            // Don't start if in placement phase with pieces remaining
+            if (gameState.placementPhase) {
+                const totalRemaining = Object.values(gameState.piecesToPlace).reduce((a, b) => a + b, 0);
+                if (totalRemaining > 0) return;
+            }
+
             if (!gameState.running) {
+                // End placement phase
+                gameState.placementPhase = false;
+
+                // Hide piece counts panel
+                document.getElementById('pieceCountsPanel').classList.add('hidden');
+
+                // Spawn opponent pieces now
+                spawnOpponentPieces();
+
                 gameState.running = true;
                 gameState.paused = false;
                 setStatus('Simulation running...');
                 updateControlButtons();
+                draw();
                 gameLoop();
                 return;
             }
 
-            // NEW: Start also unpauses if currently paused
             if (gameState.running && gameState.paused) {
                 gameState.paused = false;
                 setStatus('Resumed');
@@ -1169,8 +1554,7 @@
         }
 
         function togglePause() {
-            if (!gameState.running) {
-                // no-op if not started
+            if (!gameState.running || gameState.gameComplete) {
                 return;
             }
             gameState.paused = !gameState.paused;
@@ -1190,27 +1574,85 @@
 
         function chooseSide(color) {
             gameState.playingAs = color;
+            gameState.sideChosen = true;
             const el = document.getElementById('playingAs');
             if (el) el.textContent = `Playing as ${color}`;
             hideRoleDialog();
+
+            // Start placement phase
+            startPlacementPhase();
+        }
+
+        function startPlacementPhase() {
+            gameState.placementPhase = true;
+            gameState.whitePieces = [];
+            gameState.blackPieces = [];
+
+            // Initialize pieces to place for player
+            initializePiecesToPlace();
+
+            // Set cursor to center of player's area
+            if (gameState.playingAs === 'Black') {
+                gameState.cursorX = 7;
+                gameState.cursorY = 2; // Middle of rows 0-5
+            } else {
+                gameState.cursorX = 7;
+                gameState.cursorY = 14; // Middle of rows 13-15
+            }
+
+            // Show piece counts panel
+            document.getElementById('pieceCountsPanel').classList.remove('hidden');
+            updatePieceCountsUI();
+
+            // Disable start button until all pieces placed
+            document.getElementById('startBtn').disabled = true;
+
+            // Disable pause button during placement
+            document.getElementById('pauseBtn').disabled = true;
+
+            setStatus('Place your pieces using WASD to move, P/N/B/R/Q/K to place, X to remove.');
+            updateControlButtons();
+            draw();
         }
 
         function resetGame() {
             gameState.running = false;
             gameState.paused = false;
+            gameState.gameComplete = false;
             gameState.blackReached = 0;
             gameState.currentPlan = null;
             gameState.currentCounter = null;
             gameState.blackMoveHistory = [];
+            gameState.placementPhase = false;
+            gameState.sideChosen = false;
+            gameState.playingAs = null;
+            gameState.whitePieces = [];
+            gameState.blackPieces = [];
+            gameState.piecesToPlace = {
+                king: 0,
+                queen: 0,
+                rook: 0,
+                bishop: 0,
+                knight: 0,
+                pawn: 0
+            };
 
-            spawnPieces();
+            // Hide piece counts panel
+            document.getElementById('pieceCountsPanel').classList.add('hidden');
+
+            // Re-enable start button
+            document.getElementById('startBtn').disabled = false;
+
+            // Disable pause button initially
+            document.getElementById('pauseBtn').disabled = true;
+
             updateUI();
             draw();
-            setStatus('Click Start to begin');
+            setStatus('Choose a side to begin');
 
             showRoleDialog();
             const playingEl = document.getElementById('playingAs');
-            if (playingEl) playingEl.textContent = gameState.playingAs ? `Playing as ${gameState.playingAs}` : 'Playing as (choose a side)';
+            if (playingEl) playingEl.textContent = 'Playing as (choose a side)';
 
             updateControlButtons();
         }
